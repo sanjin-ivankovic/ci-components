@@ -1,0 +1,166 @@
+---
+# =============================================================================
+# GitLab CI for example-org/ci-components — the shared CI/CD components repo.
+#
+# Runs on the homelab gitlab-runner (Docker executor binding the host docker
+# socket — tags: [docker]). A git TAG is the release: each tag publishes the
+# components to the CI/CD Catalog, and consumers pin `@MAJOR.MINOR.PATCH`.
+#
+# The pipeline validates this repo's own components (included by local path) so a
+# branch confirms each component renders and runs before a tag is cut. The
+# jobs read this repo's .config/ rule files and run on the ci-base image (built
+# + signed by build:ci-image / sign:ci-image below).
+#
+# Releases are automatic: on a main push, auto-tag computes the next SemVer from
+# the Conventional Commits and pushes the tag; the tag pipeline's release job
+# creates the GitLab release object that publishes to the Catalog.
+#
+# Token: $CI_COMPONENTS_RELEASE_TOKEN — a project CI/CD variable (masked +
+# protected), a write_repository token whose role may CREATE protected release
+# tags.
+#
+# GitHub mirror: a sanitized snapshot is force-pushed to the public GitHub mirror
+# by mirror:github on the `mirror` pipeline schedule (SCHEDULE_TYPE=mirror).
+# Harbor auth via the GitLab Harbor integration ($HARBOR_*); secrets via group
+# CI/CD variables: COSIGN_KEY/COSIGN_PASSWORD, GITHUB_PUBLISH_TOKEN.
+# =============================================================================
+
+default:
+  tags:
+    - docker
+  # Superseded pipelines auto-cancel (workflow:auto_cancel below). Jobs with
+  # side effects (build/sign/attest/tag/release/mirror) opt back out below.
+  interruptible: true
+
+# The pipeline consumes this repo's own components by local path, so a branch
+# validates that each component renders and runs before a tag is cut.
+include:
+  - local: /templates/scan-secrets/template.yml
+    inputs:
+      # Also scan on release-tag pipelines (the SemVer tag push from auto-tag).
+      rules:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+        - if: '$CI_COMMIT_TAG =~ /^[0-9]+\.[0-9]+\.[0-9]+$/'
+  - local: /templates/lint-yaml/template.yml
+  - local: /templates/lint-shell/template.yml
+  - local: /templates/lint-markdown/template.yml
+  # Conventional-commit gate on MRs — protects auto-tag's SemVer derivation.
+  - local: /templates/lint-commits/template.yml
+  - local: /templates/test-ci-scripts/template.yml
+  - local: /templates/ci-image/template.yml
+    inputs:
+      image_name: example-org/ci-components/ci
+      # The Dockerfile + everything it bakes: the /opt/ci publish/sanitize
+      # tooling and the /opt/ci/config shared defaults.
+      changes:
+        - .ci/docker/Dockerfile
+        - .ci/scripts/publish_github.py
+        - .ci/scripts/sanitize_repo.py
+        - .ci/scripts/verify_sanitization.py
+        - .ci/config/**
+        - .config/**
+  - local: /templates/cosign-sign/template.yml
+    inputs:
+      job_name: "sign:ci-image"
+      needs_job: "build:ci-image"
+      rules:
+        - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "rebuild"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+          changes:
+            - .ci/docker/Dockerfile
+            - .ci/scripts/publish_github.py
+            - .ci/scripts/sanitize_repo.py
+            - .ci/scripts/verify_sanitization.py
+            - .ci/config/**
+            - .config/**
+  - local: /templates/sbom-attest/template.yml
+    inputs:
+      job_name: "sbom:ci-image"
+      needs_job: "build:ci-image"
+      rules:
+        - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "rebuild"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+          changes:
+            - .ci/docker/Dockerfile
+            - .ci/scripts/publish_github.py
+            - .ci/scripts/sanitize_repo.py
+            - .ci/scripts/verify_sanitization.py
+            - .ci/config/**
+            - .config/**
+  # Conventional-commit SemVer release tagging, via this repo's own component.
+  - local: /templates/auto-tag/template.yml
+    inputs:
+      token: "$CI_COMPONENTS_RELEASE_TOKEN"
+  # Failure alert for main pipelines; skips silently while no webhook is set.
+  - local: /templates/notify-discord/template.yml
+  - local: /templates/mirror-github/template.yml
+    inputs:
+      repo_name: ci-components
+
+stages:
+  - scan
+  - lint
+  - test
+  - release
+  - image
+  - mirror
+
+variables:
+  CI_IMAGE: registry.example.com/example-org/ci-components/ci:latest
+  CI_IMAGE_BASE: registry.example.com/example-org/ci-components/ci
+  GIT_DEPTH: "50"
+
+# Schedule pipelines (the mirror), MR pipelines on branches, push pipelines on
+# main, plus release-tag pipelines so a SemVer tag push gets a green scan + the
+# Catalog release job.
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_COMMIT_TAG =~ /^[0-9]+\.[0-9]+\.[0-9]+$/'
+    - when: never
+
+# Side-effecting jobs must never be killed mid-flight by auto-cancel: a
+# half-signed image or half-pushed tag is worse than a stale pipeline. These
+# partial overrides merge onto the component-generated jobs by name.
+build:ci-image:
+  interruptible: false
+sign:ci-image:
+  interruptible: false
+sbom:ci-image:
+  interruptible: false
+auto-tag:
+  interruptible: false
+mirror:github:
+  interruptible: false
+
+# -----------------------------------------------------------------------------
+# Release tagging is the auto-tag COMPONENT (included above, dogfooded like the
+# rest): on a main push it computes the next SemVer from Conventional Commits
+# and pushes the tag; the tag pipeline's release job (below) creates the GitLab
+# release object that publishes the version to the CI/CD Catalog. Tags are bare
+# SemVer `MAJOR.MINOR.PATCH` (`@1.0.0` resolves to tag `1.0.0`).
+# -----------------------------------------------------------------------------
+# Release: on the tag pipeline started by auto-tag's push, create the GitLab
+# release object. The CI/CD Catalog requires a release (not just a tag) to
+# publish the component version. The release-cli image provides the release
+# keyword runtime.
+# -----------------------------------------------------------------------------
+release:
+  stage: release
+  interruptible: false
+  image: registry.gitlab.com/gitlab-org/release-cli:latest@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
+  needs:
+    - job: scan:secrets
+      optional: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - echo "=== publishing release $CI_COMMIT_TAG to the CI/CD Catalog ==="
+  release:
+    tag_name: $CI_COMMIT_TAG
+    description: "Release $CI_COMMIT_TAG of the homelab CI/CD components."

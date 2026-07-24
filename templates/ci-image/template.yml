@@ -1,0 +1,110 @@
+# =============================================================================
+# ci-image — build, push, and digest-pin a repo's CI image, then write the ref
+# for cosign-sign.
+#
+# Builds with docker:cli (NOT ci-base — this job BUILDS the CI image, so it
+# can't run on it), logs into Harbor, pushes :latest + :$CI_COMMIT_SHA, then
+# writes the full immutable ref (registry/repo@sha256:...) to image-ref.txt as an
+# artifact for the cosign-sign component.
+#
+# `build_args` + `setup_script` let a consumer customize the build without
+# editing the component: setup_script lines run after the Harbor login (e.g.
+# write a BuildKit --secret token file), build_args flags go on the `docker
+# build` (e.g. the matching --secret).
+#
+# Usage (argo-apps, with the kryptos BuildKit secret):
+#   include:
+#     - component: source.example.com/example-org/ci-components/ci-image@<version>
+#       inputs:
+#         image_name: homelab/argo-apps/ci
+#         setup_script: printf '%s' "$KRYPTOS_READ_TOKEN" > "$CI_PROJECT_DIR/.kryptos_token"
+#         build_args: "--secret id=kryptos_token,src=$CI_PROJECT_DIR/.kryptos_token"
+#   # then sign it:
+#     - component: source.example.com/example-org/ci-components/cosign-sign@<version>
+#       inputs:
+#         job_name: "sign:ci-image"
+#         needs_job: "build:ci-image"
+#
+# Secrets: $HARBOR_* (login). $DOCKER_BUILDKIT is set so --secret works.
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "build:ci-image"
+      description: "Name of the generated job."
+    stage:
+      default: image
+      description: "Stage the job runs in."
+    builder_image:
+      # renovate: datasource=docker depName=docker versioning=docker
+      default: docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144
+      description: "The docker CLI image that performs the build (digest-pinned here, Renovate-tracked — consumers should not restate it)."
+    image_name:
+      description: "Image path under the registry, e.g. homelab/argo-apps/ci."
+    registry:
+      default: registry.example.com
+      description: "Container registry host."
+    dockerfile:
+      default: .ci/docker/Dockerfile
+      description: "Path to the Dockerfile."
+    context:
+      default: "."
+      description: "Docker build context."
+    build_args:
+      default: ""
+      description: "Extra `docker build` flags (e.g. --secret/--build-arg)."
+    setup_script:
+      default: "true"
+      description: "An extra shell line run after the Harbor login (e.g. write a BuildKit secret file). Defaults to a no-op."
+    ref_file:
+      default: image-ref.txt
+      description: "Artifact file the digest ref is written to (for cosign-sign)."
+    changes:
+      type: array
+      description: "changes: globs that trigger a rebuild (main push only)."
+      default:
+        - .ci/docker/**
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.builder_image ]]
+  needs: []
+  rules:
+    # Scheduled full rebuild (SCHEDULE_TYPE=rebuild): no changes gate, so
+    # OS/pip/npm CVE fixes in base layers land without a Dockerfile edit.
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "rebuild"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      changes: $[[ inputs.changes ]]
+  variables:
+    DOCKER_CONFIG: $CI_PROJECT_DIR/.docker
+    DOCKER_BUILDKIT: "1"
+    IMAGE_BASE: $[[ inputs.registry ]]/$[[ inputs.image_name ]]
+  before_script:
+    - mkdir -p "$DOCKER_CONFIG"
+    - echo "$HARBOR_PASSWORD" | docker login "$HARBOR_HOST" -u "$HARBOR_USERNAME" --password-stdin
+    - $[[ inputs.setup_script ]]
+  script:
+    - docker build $[[ inputs.build_args ]] -f $[[ inputs.dockerfile ]] -t "$IMAGE_BASE:latest" -t "$IMAGE_BASE:$CI_COMMIT_SHA" $[[ inputs.context ]]
+    - docker push "$IMAGE_BASE:latest"
+    - docker push "$IMAGE_BASE:$CI_COMMIT_SHA"
+    # Write the full immutable ref (registry/repo@sha256:...) for cosign-sign.
+    #
+    # Read the digest from the REGISTRY, not from the local daemon. The previous
+    # implementation used `docker inspect --format '{{index .RepoDigests 0}}'`,
+    # but RepoDigests is an unordered accumulation of every digest the daemon has
+    # ever associated with that image name. On a long-lived self-hosted runner,
+    # index [0] can be a STALE digest from an earlier build — so cosign-sign then
+    # signed the wrong (previous) image while :latest went unsigned. That is not
+    # theoretical: argo-apps/ci:latest shipped unsigned while an older digest
+    # carried the signature.
+    #
+    # `buildx imagetools inspect` resolves the tag against the registry, so it
+    # always returns the digest we just pushed. (`docker push` has no
+    # digest-output flag — there is no --digestfile on docker/cli.)
+    - DIGEST=$(docker buildx imagetools inspect "$IMAGE_BASE:latest" --format '{{.Manifest.Digest}}')
+    - echo "$IMAGE_BASE@$DIGEST" > $[[ inputs.ref_file ]]
+    - echo "built $(cat $[[ inputs.ref_file ]])"
+  artifacts:
+    paths:
+      - $[[ inputs.ref_file ]]
+    expire_in: 1 hour

@@ -1,0 +1,72 @@
+# =============================================================================
+# sbom-attest — generate an SPDX SBOM for a built image and attach it as a
+# cosign attestation, by immutable ref.
+#
+# Same contract as cosign-sign: the build job wrote the full image ref
+# (registry/repo@sha256:...) to `ref_file` and exposed it as an artifact; point
+# `needs_job` at that job. syft produces the SPDX JSON, cosign attests it with
+# the homelab's keyed setup (empty signing-config — no Fulcio/Rekor/TSA/OIDC,
+# no public transparency log; the same model as cosign-sign). Harbor renders
+# the attached SBOM natively.
+#
+# Verify offline with the committed public key:
+#   cosign verify-attestation --key cosign.pub --type spdxjson \
+#     --insecure-ignore-tlog=true <ref>
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/sbom-attest@<version>
+#       inputs:
+#         needs_job: build:ci-image
+#
+# Secrets (group CI/CD vars): $HARBOR_* (login), $COSIGN_KEY (File variable →
+# a PATH; pass to --key directly), $COSIGN_PASSWORD.
+# Requires syft + cosign in the image (ci-base has both).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "sbom:image"
+      description: "Name of the generated job."
+    stage:
+      default: image
+      description: "Stage the job runs in (at/after the build job's stage)."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying syft + cosign (defaults to the consumer's $CI_IMAGE variable)."
+    ref_file:
+      default: image-ref.txt
+      description: "Artifact file holding the full image ref to attest."
+    needs_job:
+      description: "Name of the build job to pull the ref_file artifact from."
+    rules:
+      type: array
+      description: "Full rules: array for the job. Default = main push + scheduled rebuilds."
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "rebuild"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  needs:
+    - job: $[[ inputs.needs_job ]]
+      artifacts: true
+  rules: $[[ inputs.rules ]]
+  variables:
+    DOCKER_CONFIG: $CI_PROJECT_DIR/.docker
+  before_script:
+    - mkdir -p "$DOCKER_CONFIG"
+    - echo "$HARBOR_PASSWORD" | cosign login "$HARBOR_HOST" -u "$HARBOR_USERNAME" --password-stdin
+  script:
+    - REF=$(cat "$[[ inputs.ref_file ]]")
+    - echo "=== syft SBOM for $REF ==="
+    # registry: scheme — always read the pushed artifact, not a daemon image.
+    - syft scan "registry:$REF" -o spdx-json=sbom.spdx.json
+    - echo "=== cosign attest $REF ==="
+    - cosign signing-config create --no-default-fulcio --no-default-rekor --no-default-tsa --no-default-oidc --out /tmp/signing-config.json
+    - cosign attest --yes --signing-config=/tmp/signing-config.json --key "$COSIGN_KEY" --predicate sbom.spdx.json --type spdxjson "$REF"
+  artifacts:
+    paths:
+      - sbom.spdx.json
+    expire_in: 30 days

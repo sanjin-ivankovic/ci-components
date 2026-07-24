@@ -1,0 +1,82 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate configuration for the homelab CI/CD Components hub (the shared ci-base image + component templates)",
+  "dependencyDashboardTitle": "Renovate Dashboard: CI Components",
+  "dependencyDashboardHeader": "Tracks dependency updates for the shared ci-base image and the CI/CD component templates.\n\n**After merging**: CI builds + signs the ci-base image; a digest-bump MR then lands in each of the four consumers before it is adopted (a bad bump here ripples to all of them).\n\n---",
+  "dependencyDashboardFooter": "---\n\n**Resources**: [CI Catalog](https://source.example.com/explore/catalog/example-org/ci-components) | [Renovate Config](https://source.example.com/example-org/ci-components/-/blob/main/renovate.json) | [CLAUDE.md](https://source.example.com/example-org/ci-components/-/blob/main/.claude/CLAUDE.md)",
+  "extends": [
+    "local>homelab/renovate",
+    "gitlab>renovate-bot/renovate-runner"
+  ],
+  "ignorePaths": [
+    "**/.git/**",
+    "**/test/**",
+    "**/tests/**"
+  ],
+  "enabledManagers": [
+    "dockerfile",
+    "custom.regex",
+    "gitlabci",
+    "pre-commit"
+  ],
+  "customManagers": [
+    {
+      "description": "Extract tool versions from Dockerfile ARG variables with Renovate annotations. The first matchString handles ARGs whose value carries a tag@sha256:<digest> (DOCKER_VERSION, TRIVY_VERSION) so the digest is maintained alongside the tag; the second handles plain version ARGs (shellcheck, gitleaks, cosign, pyyaml, tqdm, yamllint, pytest, pytest-cov, requests, markdownlint-cli2).",
+      "customType": "regex",
+      "managerFilePatterns": ["/Dockerfile$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+versioning=(?<versioning>\\S+))?(?:\\s+extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*ARG\\s+\\w+=[\"']?(?<currentValue>[^\"'\\s@]+)@(?<currentDigest>sha256:[a-f0-9]+)[\"']?",
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+versioning=(?<versioning>\\S+))?(?:\\s+extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*ARG\\s+\\w+=[\"']?(?<currentValue>[^\"'\\s@]+)[\"']?(?:\\s|$)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    },
+    {
+      "description": "Extract annotated image pins from component template spec defaults (e.g. the ci-image component's digest-pinned builder_image default). Unlike the Dockerfile ARGs (bare tag, the repo lives on the FROM line), a template default carries the FULL image ref `<repo>:<tag>@sha256:<digest>`. The `\\S*?:` before the capture consumes the `<repo>:` prefix so currentValue is ONLY the tag (e.g. `29.6.1-cli`, not `docker:29.6.1-cli`) — otherwise the docker datasource looks up a bogus `docker:<tag>` and fails with 'Could not determine new digest'. The prefix sits outside the capture, so autoreplace rewrites only tag+digest and leaves `<repo>:` intact.",
+      "customType": "regex",
+      "managerFilePatterns": ["/templates/.+/template\\.yml$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+versioning=(?<versioning>\\S+))?\\s*\\n\\s*default:\\s*\\S*?:(?<currentValue>[^\\s@:]+)@(?<currentDigest>sha256:[a-f0-9]+)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Docker build base - the ci-base FROM line uses ARG indirection (FROM docker:${DOCKER_VERSION}) so the ARG value carries tag@sha256 and is seen by both the native dockerfile manager and the custom.regex annotation. With pinDigests:true the inherited docker:pinDigests probes a malformed `manifests/<tag>@sha256:<digest>` HEAD that 404s ('Could not determine new digest'). false suppresses the probe; a real tag bump still rewrites tag+digest via the autoReplaceStringTemplate, so the digest stays current.",
+      "matchFileNames": [".ci/docker/Dockerfile", "templates/**/template.yml"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["docker"],
+      "groupName": "docker-ci-images",
+      "commitMessagePrefix": "ci(docker):",
+      "pinDigests": false,
+      "labels": ["ci", "docker"],
+      "prPriority": 8
+    },
+    {
+      "description": "Trivy - security vulnerability + IaC scanner, higher priority. Trivy is a base image via ARG indirection (FROM aquasec/trivy:${TRIVY_VERSION}), tracked by the custom.regex Dockerfile-ARG manager (depName aquasec/trivy) because the native dockerfile manager can't resolve the ARG. pinDigests:true bumps tag + digest together; the security label + raised priority surface scanner updates promptly.",
+      "matchFileNames": [".ci/docker/Dockerfile"],
+      "matchManagers": ["dockerfile", "custom.regex"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["aquasec/trivy"],
+      "pinDigests": true,
+      "commitMessagePrefix": "ci(trivy):",
+      "labels": ["ci", "security"],
+      "prPriority": 9,
+      "groupName": "Trivy Security Scanner"
+    },
+    {
+      "description": "ci-base build tool dependencies - separate MRs per tool. Covers the fetched binaries (shellcheck, gitleaks, cosign) and the pip/npm tools (pyyaml, tqdm, yamllint, pytest, pytest-cov, requests, markdownlint-cli2). Excludes docker (the build base, handled by the docker-ci-images group) and trivy (the security-scanner base image, handled by its own digest-pinned rule) so those keep their digests.",
+      "matchFileNames": [".ci/docker/Dockerfile"],
+      "matchManagers": ["dockerfile", "custom.regex"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "pinDigests": false,
+      "commitMessagePrefix": "ci({{depName}}):",
+      "labels": ["ci", "docker"],
+      "prPriority": 8,
+      "matchPackageNames": [
+        "!docker",
+        "!aquasec/trivy"
+      ]
+    }
+  ]
+}

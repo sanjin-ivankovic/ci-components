@@ -1,0 +1,90 @@
+# =============================================================================
+# notify-discord — post a Discord embed about this pipeline (failure alert by
+# default).
+#
+# Runs in .post with `when: on_failure`, so out of the box it fires exactly
+# when a main-push pipeline failed. Skips silently when the webhook variable is
+# unset — safe to include in every repo and configure the webhook only where
+# notifications are wanted. Payload is sent with python3 + requests (both in
+# ci-base; the image carries no curl by design).
+#
+# Usage (failure alert, the default):
+#   include:
+#     - component: source.example.com/example-org/ci-components/notify-discord@<version>
+#
+# Usage (success notification, e.g. after a publish job):
+#   include:
+#     - component: source.example.com/example-org/ci-components/notify-discord@<version>
+#       inputs:
+#         job_name: "notify:published"
+#         title: "charts published"
+#         color: "3066993"
+#         when: on_success
+#
+# Secrets: $DISCORD_WEBHOOK_URL (project CI/CD variable) — or point `webhook`
+# at another variable reference.
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "notify:pipeline"
+      description: "Name of the generated job."
+    stage:
+      default: .post
+      description: "Stage the job runs in (.post = after everything else)."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying python3 + requests (defaults to the consumer's $CI_IMAGE variable)."
+    webhook:
+      default: "$DISCORD_WEBHOOK_URL"
+      description: "Variable reference holding the Discord webhook URL. Unset at runtime = skip silently."
+    title:
+      default: "pipeline failed: $CI_PROJECT_NAME"
+      description: "Embed title."
+    description:
+      default: "$CI_COMMIT_REF_NAME · $CI_COMMIT_TITLE"
+      description: "Embed body text."
+    color:
+      default: "15158332"
+      description: "Embed color (decimal). Default red; 3066993 = green."
+    when:
+      default: on_failure
+      description: "Job when: — on_failure (default) or on_success."
+    rules:
+      type: array
+      description: "Full rules: array for the job. Default = main push."
+      default:
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  when: $[[ inputs.when ]]
+  rules: $[[ inputs.rules ]]
+  variables:
+    NOTIFY_WEBHOOK: $[[ inputs.webhook ]]
+    NOTIFY_TITLE: $[[ inputs.title ]]
+    NOTIFY_DESCRIPTION: $[[ inputs.description ]]
+    NOTIFY_COLOR: $[[ inputs.color ]]
+  script:
+    - |
+      python3 - <<'PYEOF'
+      import os
+      import sys
+
+      import requests
+
+      url = os.environ.get("NOTIFY_WEBHOOK", "")
+      if not url:
+          print("NOTIFY_WEBHOOK unset; skipping notification")
+          sys.exit(0)
+      embed = {
+          "title": os.environ.get("NOTIFY_TITLE", "pipeline event"),
+          "description": os.environ.get("NOTIFY_DESCRIPTION", ""),
+          "color": int(os.environ.get("NOTIFY_COLOR", "15158332")),
+          "url": os.environ.get("CI_PIPELINE_URL", ""),
+      }
+      resp = requests.post(url, json={"embeds": [embed]}, timeout=10)
+      resp.raise_for_status()
+      print(f"notified discord ({resp.status_code})")
+      PYEOF

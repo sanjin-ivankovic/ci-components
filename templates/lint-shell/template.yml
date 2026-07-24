@@ -1,0 +1,49 @@
+# =============================================================================
+# lint-shell — shellcheck over the repo's tracked *.sh, gated to shell changes.
+# Reads the CONSUMER's own .config/.shellcheckrc when present; falls back to
+# the shared default baked into ci-base at /opt/ci/config/.shellcheckrc.
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/lint-shell@<version>
+#
+# The gate (MR + main push on shell files) is baked into the body. A consumer
+# that needs different gating overrides the generated job's rules: directly.
+#
+# Requires shellcheck in the image (ci-base has it).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "lint:shell"
+      description: "Name of the generated job."
+    stage:
+      default: lint
+      description: "Stage the job runs in."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying shellcheck (defaults to the consumer's $CI_IMAGE variable)."
+    config:
+      default: .config/.shellcheckrc
+      description: "Path to the consumer's shellcheck rc."
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "**/*.sh"
+        - .config/.shellcheckrc
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      changes:
+        - "**/*.sh"
+        - .config/.shellcheckrc
+  script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    # Repo-local config wins; the baked ci-base default is the fallback.
+    - CONF="$[[ inputs.config ]]"; [ -f "$CONF" ] || CONF=/opt/ci/config/.shellcheckrc
+    - |
+      FILES=$(git ls-files '*.sh' | grep -v '^\.archive/' || true)
+      if [ -z "$FILES" ]; then echo "no shell scripts"; exit 0; fi
+      echo "$FILES" | xargs shellcheck --rcfile="$CONF"
