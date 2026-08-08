@@ -1,0 +1,65 @@
+# =============================================================================
+# scan-secrets — bypass-proof gitleaks secret scan over full history.
+#
+# Scans ALL tracked content over the full git history (GIT_DEPTH 0), independent
+# of changed files, so a secret can't be slipped in on a branch that avoids the
+# changed-paths gate. Reads the CONSUMER's own .config/.gitleaks.toml +
+# .config/.gitleaksignore when present; falls back to the shared default baked
+# into ci-base at /opt/ci/config/ when the repo carries no local copy.
+# --platform=gitlab yields correct finding-link URLs for source.example.com.
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/scan-secrets@<version>
+#   # default rules: MR + main push. A repo that also scans on release tags
+#   # passes its own rules array (no need to restate inside an extends):
+#   include:
+#     - component: source.example.com/example-org/ci-components/scan-secrets@<version>
+#       inputs:
+#         rules:
+#           - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+#           - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+#           - if: '$CI_COMMIT_TAG =~ /^v/'
+#
+# Secrets: none (reads the repo). Requires gitleaks in the image (ci-base has it).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "scan:secrets"
+      description: "Name of the generated job."
+    stage:
+      default: scan
+      description: "Stage the job runs in."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying gitleaks (defaults to the consumer's $CI_IMAGE variable)."
+    gitleaks_config:
+      default: .config/.gitleaks.toml
+      description: "Path to the consumer's gitleaks config."
+    gitleaks_ignore:
+      default: .config/.gitleaksignore
+      description: "Path to the consumer's gitleaks ignore file."
+    rules:
+      type: array
+      description: "Full rules: array for the job. Default = MR + main push."
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  variables:
+    GIT_DEPTH: "0"
+  rules: $[[ inputs.rules ]]
+  script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    # Repo-local config wins; the baked ci-base default is the fallback. The
+    # ignore file is optional — the flag is only passed when the file exists.
+    - CONF="$[[ inputs.gitleaks_config ]]"; [ -f "$CONF" ] || CONF=/opt/ci/config/.gitleaks.toml
+    - IGNORE_ARGS=""; [ -f "$[[ inputs.gitleaks_ignore ]]" ] && IGNORE_ARGS="--gitleaks-ignore-path $[[ inputs.gitleaks_ignore ]]" || true
+    - >
+      gitleaks git --platform=gitlab
+      --config "$CONF" $IGNORE_ARGS
+      --redact --verbose --exit-code 1 .
