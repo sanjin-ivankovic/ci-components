@@ -1,0 +1,59 @@
+# =============================================================================
+# mirror-github — sanitize the repo and force-push it to a public GitHub mirror.
+#
+# Runs publish_github.py → sanitize_repo.py → verify, then force-pushes the
+# sanitized result to the public GitHub mirror over HTTPS+PAT. The publish
+# tooling is baked into ci-base at /opt/ci. The CONSUMER's own
+# .ci/sanitize/sanitize-config.yaml drives what is stripped (read via
+# SOURCE_REPO — repo-local, genuinely divergent per repo).
+#
+# Runs on the `mirror` pipeline schedule (SCHEDULE_TYPE == schedule_type).
+# Stagger the cron per repo (e.g. argo 04:00 · helm 04:10 · proxmox 04:20 ·
+# ci-components 04:30, Europe/Berlin).
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/mirror-github@<version>
+#       inputs:
+#         repo_name: argo-apps
+#
+# Secrets: $GITHUB_PUBLISH_TOKEN (group CI/CD variable).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "mirror:github"
+      description: "Name of the generated job."
+    stage:
+      default: mirror
+      description: "Stage the job runs in."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying the /opt/ci publish tooling (defaults to $CI_IMAGE)."
+    repo_name:
+      description: "The repo's name on GitHub (the mirror destination repo)."
+    repo_owner:
+      default: maintainer-user
+      description: "The GitHub account/org that owns the mirror."
+    schedule_type:
+      default: mirror
+      description: "SCHEDULE_TYPE value that gates this scheduled job."
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "$[[ inputs.schedule_type ]]"'
+  # Never download earlier jobs' artifacts: the snapshot must contain ONLY the
+  # clean clone. A prior-stage artifact dropped into CI_PROJECT_DIR gets
+  # published (the renovate runner's debug-log NDJSON leaked this way).
+  dependencies: []
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+    GITHUB_REPO_NAME: $[[ inputs.repo_name ]]
+    GITHUB_REPO_OWNER: $[[ inputs.repo_owner ]]
+  script:
+    - export SOURCE_REPO="$CI_PROJECT_DIR" OUTPUT_REPO=/tmp/publish-output
+    - export GITHUB_TOKEN="$GITHUB_PUBLISH_TOKEN"
+    - python3 /opt/ci/publish_github.py --verbose

@@ -1,0 +1,65 @@
+# =============================================================================
+# lint-commits — enforce Conventional Commits on merge-request pipelines.
+#
+# The auto-tag component derives SemVer bumps from commit messages, so a
+# malformed subject silently produces a wrong release version. This job checks
+# every non-merge commit between the MR diff base and HEAD against the group's
+# Conventional Commit types. Dependency-free (git + grep — no commitlint/node),
+# and the regex intentionally matches what auto-tag's parser understands.
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/lint-commits@<version>
+#
+# Runs on MR pipelines only ($CI_MERGE_REQUEST_DIFF_BASE_SHA is required).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "lint:commits"
+      description: "Name of the generated job."
+    stage:
+      default: lint
+      description: "Stage the job runs in."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying git (defaults to the consumer's $CI_IMAGE variable)."
+    types:
+      default: "feat|fix|docs|refactor|chore|test|ci|build"
+      description: "Alternation of allowed Conventional Commit types."
+    rules:
+      type: array
+      description: "Full rules: array for the job. Default = MR pipelines."
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  variables:
+    GIT_DEPTH: "0"   # need the full range back to the MR diff base
+    COMMIT_TYPES: "$[[ inputs.types ]]"
+  rules: $[[ inputs.rules ]]
+  script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - |
+      set -eu
+      PATTERN="^(${COMMIT_TYPES})(\([a-zA-Z0-9._/-]+\))?!?: .+"
+      BAD=0
+      for SHA in $(git rev-list --no-merges "${CI_MERGE_REQUEST_DIFF_BASE_SHA}..HEAD"); do
+        SUBJECT=$(git log -1 --format=%s "$SHA")
+        if echo "$SUBJECT" | grep -qE "$PATTERN"; then
+          echo "ok   $SHA  $SUBJECT"
+        else
+          echo "FAIL $SHA  $SUBJECT"
+          BAD=1
+        fi
+      done
+      if [ "$BAD" -ne 0 ]; then
+        echo ""
+        echo "Commit subjects must match: <type>(<scope>)?: <description>"
+        echo "Allowed types: ${COMMIT_TYPES}"
+        echo "auto-tag derives release versions from these — fix with rebase/reword."
+        exit 1
+      fi
+      echo "all commit subjects conform"

@@ -1,0 +1,63 @@
+# =============================================================================
+# test-ci-scripts — pytest + coverage for a repo's .ci/scripts.
+#
+# The coverage threshold lives in the consumer's own .ci/scripts/pytest.ini
+# (helm-charts is stricter), NOT here. helm-charts runs this in the `lint` stage
+# because publish:charts needs it — override `stage` for that.
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/test-ci-scripts@<version>
+#   # helm-charts: run earlier
+#   include:
+#     - component: source.example.com/example-org/ci-components/test-ci-scripts@<version>
+#       inputs:
+#         stage: lint
+#
+# Requires pytest + the scripts' deps in the image (ci-base has the base stack;
+# a consumer with extra deps installs them in its image layer).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "test:ci-scripts"
+      description: "Name of the generated job."
+    stage:
+      default: test
+      description: "Stage the job runs in."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying pytest + script deps (defaults to the consumer's $CI_IMAGE variable)."
+    path:
+      default: .ci/scripts
+      description: "Directory holding the scripts + their tests + pytest.ini."
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  # Gated to .ci/scripts on MR + main push (baked into the body — GitLab's
+  # spec:inputs validator rejects array DEFAULTS with nested maps like
+  # `changes:`). Override the generated job's rules: directly if needed.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - .ci/scripts/**/*
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      changes:
+        - .ci/scripts/**/*
+  # Scrapes pytest-cov's terminal summary so GitLab charts the coverage % over
+  # time and shows the delta on the MR.
+  coverage: '/^TOTAL\s+.*\s+(\d+(?:\.\d+)?)%$/'
+  script:
+    # --junitxml feeds GitLab's MR test-summary widget via artifacts:reports.
+    # The consumer's pytest.ini already writes coverage.xml (--cov-report=xml);
+    # artifacts:reports:coverage_report below is what surfaces it on the MR.
+    - cd $[[ inputs.path ]] && pytest -v --cov --cov-report=term --junitxml=pytest-junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: $[[ inputs.path ]]/pytest-junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: $[[ inputs.path ]]/coverage.xml
+    expire_in: 7 days
