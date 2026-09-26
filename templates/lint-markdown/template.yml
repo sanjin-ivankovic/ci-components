@@ -1,0 +1,48 @@
+# =============================================================================
+# lint-markdown — markdownlint-cli2 over the repo's Markdown, gated to Markdown
+# changes. Reads the CONSUMER's own .config/.markdownlint-cli2.jsonc when
+# present; falls back to the shared default baked into ci-base at
+# /opt/ci/config/.markdownlint-cli2.jsonc.
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/lint-markdown@<version>
+#
+# The gate (MR + main push on Markdown files) is baked into the body. A consumer
+# that needs different gating overrides the generated job's rules: directly.
+#
+# Requires markdownlint-cli2 in the image (ci-base has it).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "lint:markdown"
+      description: "Name of the generated job."
+    stage:
+      default: lint
+      description: "Stage the job runs in."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying markdownlint-cli2 (defaults to the consumer's $CI_IMAGE variable)."
+    config:
+      default: .config/.markdownlint-cli2.jsonc
+      description: "Path to the consumer's markdownlint config."
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "**/*.md"
+        - .config/.markdownlint-cli2.jsonc
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      changes:
+        - "**/*.md"
+        - .config/.markdownlint-cli2.jsonc
+  script:
+    # Repo-local config wins; the baked ci-base default is the fallback.
+    - CONF="$[[ inputs.config ]]"; [ -f "$CONF" ] || CONF=/opt/ci/config/.markdownlint-cli2.jsonc
+    # markdownlint-cli2 REQUIRES a positional glob — --config alone lints 0 files
+    # (a silent no-op). The .markdownlint-cli2.jsonc `ignores` still apply.
+    - markdownlint-cli2 --config "$CONF" "**/*.md"
