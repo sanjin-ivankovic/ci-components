@@ -1,0 +1,65 @@
+# =============================================================================
+# cosign-sign — sign a container image by immutable ref with the homelab's
+# keyed cosign setup (no Fulcio/Rekor/TSA/OIDC — a bare key pair).
+#
+# The ref is read from a file the build job produced and passed as an artifact,
+# so build + sign stay separate jobs (the docker:cli build image has no cosign;
+# ci-base has cosign but no docker).
+#
+# Contract:
+#   - The build job writes the FULL image ref (registry/repo@sha256:...) to the
+#     file named by `ref_file` (default image-ref.txt) and exposes it as an
+#     artifact.
+#   - Point `needs_job` at the build job so this job pulls that artifact.
+#
+# Usage:
+#   include:
+#     - component: source.example.com/example-org/ci-components/cosign-sign@<version>
+#       inputs:
+#         needs_job: build:my-image
+#         rules:
+#           - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+#
+# Secrets (group CI/CD vars): $HARBOR_* (login), $COSIGN_KEY (a File variable →
+# it is a PATH; pass it to --key directly, never printf it), $COSIGN_PASSWORD.
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "sign:image"
+      description: "Name of the generated job."
+    stage:
+      default: image
+      description: "Stage the job runs in (at/after the build job's stage)."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying cosign (defaults to the consumer's $CI_IMAGE variable)."
+    ref_file:
+      default: image-ref.txt
+      description: "Artifact file holding the full image ref to sign."
+    needs_job:
+      description: "Name of the build job to pull the ref_file artifact from."
+    rules:
+      type: array
+      description: "Full rules: array for the job. Default = main push + scheduled rebuilds."
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "rebuild"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  needs:
+    - job: $[[ inputs.needs_job ]]
+      artifacts: true
+  rules: $[[ inputs.rules ]]
+  variables:
+    DOCKER_CONFIG: $CI_PROJECT_DIR/.docker
+  before_script:
+    - mkdir -p "$DOCKER_CONFIG"
+    - echo "$HARBOR_PASSWORD" | cosign login "$HARBOR_HOST" -u "$HARBOR_USERNAME" --password-stdin
+  script:
+    - REF=$(cat "$[[ inputs.ref_file ]]")
+    - echo "=== cosign sign $REF ==="
+    - cosign signing-config create --no-default-fulcio --no-default-rekor --no-default-tsa --no-default-oidc --out /tmp/signing-config.json
+    - cosign sign --yes --signing-config=/tmp/signing-config.json --new-bundle-format --key "$COSIGN_KEY" "$REF"
