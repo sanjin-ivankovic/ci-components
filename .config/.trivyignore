@@ -1,0 +1,10 @@
+# Trivy findings accepted for this repo's CI image scan (trivy:ci-image).
+# Plain format: one CVE or GHSA ID per line, each with a comment saying why
+# and an exp:YYYY-MM-DD date that forces a re-triage. trivy fails when the
+# --ignorefile path is missing, so the file exists even when it is empty.
+
+# ci-base gitleaks 8.30.1 (the newest release) is built with Go 1.24.11.
+# CVE-2025-68121 is in crypto/tls session resumption; CI runs gitleaks only
+# over local git history, which opens no TLS connection. Clears when a
+# gitleaks release ships a fixed Go (Renovate bumps GITLEAKS_VERSION).
+CVE-2025-68121 exp:2027-01-31

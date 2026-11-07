@@ -1,0 +1,55 @@
+---
+# GitLab pipeline schedules for every homelab repo. Applied from a laptop
+# with `make schedules` (shows the difference) and `make schedules-apply`;
+# .ci/scripts/sync_schedules.py talks to GitLab through the operator's glab
+# login. A schedule is matched by project and description, so renaming one
+# here creates a new schedule and leaves the old one for --prune.
+#
+# The mirrors are staggered ten minutes apart so the runner's two slots never
+# queue them; the image rebuild and Renovate run before the mirrors start.
+timezone: Europe/Berlin
+ref: main
+schedules:
+  - project: homelab/renovate
+    description: renovate
+    cron: "0 3 * * *"
+  - project: example-org/ci-components
+    description: CI-image rebuild
+    cron: "30 03 * * 0"
+    variables:
+      SCHEDULE_TYPE: rebuild
+  - project: homelab/argo-apps
+    description: GitHub Mirror
+    cron: "0 4 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror
+  - project: homelab/helm-charts
+    description: GitHub Mirror
+    cron: "10 4 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror
+  - project: homelab/proxmox-infra
+    description: GitHub Mirror
+    cron: "20 4 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror
+  - project: example-org/ci-components
+    description: GitHub Mirror
+    cron: "30 4 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror
+  - project: homelab/kryptos
+    description: GitHub Mirror
+    cron: "40 4 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror
+  - project: homelab/renovate
+    description: GitHub Mirror
+    cron: "50 4 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror
+  - project: homelab/mcp-plugins
+    description: GitHub Mirror
+    cron: "0 5 * * *"
+    variables:
+      SCHEDULE_TYPE: mirror

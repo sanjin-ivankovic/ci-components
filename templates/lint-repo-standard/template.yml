@@ -1,0 +1,51 @@
+# =============================================================================
+# lint-repo-standard — check the repo against docs/REPO-STANDARD.md.
+#
+# Runs /opt/ci/check_repo_standard.py over the tracked files. Accepted
+# deviations live in the consumer's .ci/repo-standard.yaml, each with a reason;
+# an exception that excuses nothing fails the job too.
+#
+# The image defaults to ci-base, not $CI_IMAGE: the checker and the base lint
+# configs it compares against are baked there, and a thin consumer image lags
+# ci-base by a digest bump (kryptos does not build on ci-base at all).
+#
+# No changes: filter. Naming rules cover every tracked file, and the check
+# takes about a second.
+#
+# Usage:
+#   include:
+#     - component: $CI_SERVER_FQDN/example-org/ci-components/lint-repo-standard@<version>
+#
+# Secrets: none (reads the repo).
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "lint:repo-standard"
+      description: "Name of the generated job."
+    stage:
+      default: lint
+      description: "Stage the job runs in."
+    image:
+      default: "$HARBOR_HOST/example-org/ci-components/ci:latest"
+      description: "Image carrying the checker at /opt/ci (ci-base)."
+    script_path:
+      default: /opt/ci/check_repo_standard.py
+      description: "The checker. ci-components runs its own branch copy."
+    args:
+      default: ""
+      description: "Extra checker arguments (the hub passes its own --base-dir)."
+    rules:
+      type: array
+      default:
+        - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+        - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      description: "When the job runs."
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  rules: $[[ inputs.rules ]]
+  script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - python3 $[[ inputs.script_path ]] $[[ inputs.args ]]
