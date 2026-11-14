@@ -1,0 +1,125 @@
+# =============================================================================
+# notify-ntfy — publish a ntfy notification about this pipeline (failure alert
+# by default).
+#
+# Runs in .post with `when: on_failure`, so out of the box it fires exactly
+# when a main-push or scheduled pipeline failed (mirror, image rebuild,
+# Renovate run). Skips silently when the URL or token
+# variable is unset — safe to include in every repo. The message is published
+# as JSON to the server root (UTF-8 safe, unlike ntfy's header form) with
+# python3 + requests (both in ci-base; the image carries no curl by design).
+# Tapping the notification opens the pipeline.
+#
+# Usage (failure alert, the default):
+#   include:
+#     - component: $CI_SERVER_FQDN/example-org/ci-components/notify-ntfy@<version>
+#
+# Usage (success notification, e.g. after a publish job):
+#   include:
+#     - component: $CI_SERVER_FQDN/example-org/ci-components/notify-ntfy@<version>
+#       inputs:
+#         job_name: "notify:published"
+#         title: "charts published"
+#         priority: "3"
+#         tags: "white_check_mark"
+#         when: on_success
+#
+# The when/rule_if pair renders as a single rules: entry with when: INSIDE the
+# rule — a job-level when: is ignored whenever rules: is present, and a rule
+# without its own when: defaults to on_success, which would invert the
+# failure-alert default.
+#
+# Secrets: $NTFY_URL (server root, e.g. https://ntfy.example.com) and
+# $NTFY_TOKEN (a write-only token for the topic), group CI/CD variables — or
+# point `url` / `token` at other variable references. Both are protected, so
+# MR pipelines skip; schedules run on the protected main branch and alert.
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "notify:pipeline"
+      description: "Name of the generated job."
+    stage:
+      default: .post
+      description: "Stage the job runs in (.post = after everything else)."
+    image:
+      default: "$CI_IMAGE"
+      description: "Image carrying python3 + requests (defaults to the consumer's $CI_IMAGE variable)."
+    url:
+      default: "$NTFY_URL"
+      description: "Variable reference holding the ntfy server root URL. Unset at runtime = skip silently."
+    token:
+      default: "$NTFY_TOKEN"
+      description: "Variable reference holding the ntfy access token. Unset at runtime = skip silently."
+    topic:
+      default: "gitlab-pipelines"
+      description: "ntfy topic to publish to."
+    title:
+      default: "pipeline failed: $CI_PROJECT_NAME"
+      description: "Notification title."
+    message:
+      default: "$CI_PIPELINE_SOURCE · $CI_COMMIT_REF_NAME · $CI_COMMIT_TITLE"
+      description: "Notification body text (the source tells a schedule from a push)."
+    priority:
+      default: "4"
+      description: "ntfy priority 1 (min) to 5 (max). Default 4 (high); 3 = default."
+    tags:
+      default: "rotating_light"
+      description: "Comma-separated ntfy tags; emoji short codes render as icons (white_check_mark for success)."
+    when:
+      default: on_failure
+      description: "Rule when: — on_failure (default) or on_success. Applied inside the rules: entry."
+    rule_if:
+      default: '$CI_PIPELINE_SOURCE == "schedule" || ($CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push")'
+      description: "The rules:if condition gating the job. Default = main push or schedule."
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  # Side-effecting (external publish) — never cancel mid-flight.
+  interruptible: false
+  rules:
+    - if: $[[ inputs.rule_if ]]
+      when: $[[ inputs.when ]]
+  variables:
+    NOTIFY_URL: $[[ inputs.url ]]
+    NOTIFY_TOKEN: $[[ inputs.token ]]
+    NOTIFY_TOPIC: $[[ inputs.topic ]]
+    NOTIFY_TITLE: $[[ inputs.title ]]
+    NOTIFY_MESSAGE: $[[ inputs.message ]]
+    NOTIFY_PRIORITY: $[[ inputs.priority ]]
+    NOTIFY_TAGS: $[[ inputs.tags ]]
+  script:
+    - |
+      python3 - <<'PYEOF'
+      import os
+      import sys
+
+      import requests
+
+      def setting(name):
+          # An undefined CI variable can reach the job as its literal "$NAME".
+          value = os.environ.get(name, "").strip()
+          return "" if value.startswith("$") else value
+
+      url, token = setting("NOTIFY_URL"), setting("NOTIFY_TOKEN")
+      if not url or not token:
+          print("NOTIFY_URL or NOTIFY_TOKEN unset; skipping notification")
+          sys.exit(0)
+      payload = {
+          "topic": os.environ.get("NOTIFY_TOPIC", "gitlab-pipelines"),
+          "title": os.environ.get("NOTIFY_TITLE", "pipeline event"),
+          "message": os.environ.get("NOTIFY_MESSAGE", "") or "pipeline event",
+          "priority": int(os.environ.get("NOTIFY_PRIORITY", "4")),
+          "tags": [t.strip() for t in os.environ.get("NOTIFY_TAGS", "").split(",") if t.strip()],
+          "click": os.environ.get("CI_PIPELINE_URL", ""),
+      }
+      resp = requests.post(
+          url.rstrip("/"),
+          json=payload,
+          headers={"Authorization": f"Bearer {token}"},
+          timeout=10,
+      )
+      resp.raise_for_status()
+      print(f"notified ntfy topic {payload['topic']} ({resp.status_code})")
+      PYEOF
