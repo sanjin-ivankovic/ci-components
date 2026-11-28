@@ -1,0 +1,70 @@
+# =============================================================================
+# ci-image-test — build a repo's CI image on a merge request, without pushing,
+# and run a smoke command inside it.
+#
+# ci-image builds and pushes only on main. A Renovate MR that bumps a tool in
+# the CI Dockerfile therefore merged unbuilt: a broken download, checksum or
+# binary first failed after merge, in the image every later pipeline pulls.
+# This job builds the same Dockerfile on the MR, tags it locally with the
+# pipeline id, runs `smoke_command` in it, and removes the local tag. Nothing
+# reaches the registry.
+#
+# Usage (next to ci-image, same image_name/changes):
+#   include:
+#     - component: $CI_SERVER_FQDN/example-org/ci-components/ci-image-test@<version>
+#       inputs:
+#         changes: [.ci/docker/Dockerfile]
+#         smoke_command: "helm version && kustomize version && kubeconform -v"
+#
+# Secrets: $HARBOR_* (pull a Harbor-hosted base), injected into MR pipelines
+# by the GitLab Harbor integration.
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: "test:ci-image"
+      description: "Name of the generated job."
+    stage:
+      default: image
+      description: "Stage the job runs in."
+    builder_image:
+      # renovate: datasource=docker depName=docker versioning=docker
+      default: docker:29.10.1-cli@sha256:b1a3836b91b7e26cfca4bf5d69c14669ac3d0267fefe5646f0ad77c6a7448e6c
+      description: "The docker CLI image that performs the build (digest-pinned here, Renovate-tracked, same as ci-image)."
+    dockerfile:
+      default: .ci/docker/Dockerfile
+      description: "Path to the Dockerfile."
+    context:
+      default: "."
+      description: "Docker build context."
+    build_args:
+      default: ""
+      description: "Extra `docker build` flags, as passed to ci-image."
+    smoke_command:
+      default: "true"
+      description: "Shell command run inside the built image (`sh -c`); a non-zero exit fails the MR. Defaults to a build-only check."
+    changes:
+      type: array
+      description: "changes: globs that trigger the MR build (merge request pipelines only)."
+      default:
+        - .ci/docker/**
+---
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.builder_image ]]
+  needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: $[[ inputs.changes ]]
+  variables:
+    DOCKER_CONFIG: $CI_PROJECT_DIR/.docker
+    DOCKER_BUILDKIT: "1"
+    TEST_TAG: ci-image-test:$CI_PIPELINE_ID
+  before_script:
+    - mkdir -p "$DOCKER_CONFIG"
+    - echo "$HARBOR_PASSWORD" | docker login "$HARBOR_HOST" -u "$HARBOR_USERNAME" --password-stdin
+  script:
+    - docker build $[[ inputs.build_args ]] -f $[[ inputs.dockerfile ]] -t "$TEST_TAG" $[[ inputs.context ]]
+    - docker run --rm --entrypoint sh "$TEST_TAG" -c '$[[ inputs.smoke_command ]]'
+  after_script:
+    - docker rmi -f "$TEST_TAG" >/dev/null 2>&1 || true
